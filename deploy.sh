@@ -173,6 +173,104 @@ setup_venv() {
         || die "Не удалось установить зависимости из requirements.txt."
 }
 
+# --------------------------- 5. PostgreSQL -----------------------------------
+# Выполнить команду от имени системного пользователя postgres
+as_postgres() {
+    if have sudo; then
+        (cd / && sudo -u postgres "$@")
+    elif [ "$(id -u)" -eq 0 ] && have su; then
+        (cd / && su -s /bin/sh postgres -c "$*")
+    else
+        die "Не удалось выполнить команду от имени postgres (нет sudo)."
+    fi
+}
+
+# Экранирование одинарных кавычек для SQL-литералов
+sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# Выполнить SQL от имени администратора БД, вернуть результат без форматирования
+psql_admin() { as_postgres psql -v ON_ERROR_STOP=1 -tA -c "$1"; }
+
+# RHEL/Fedora/Arch: кластер БД может быть не инициализирован
+init_postgres_cluster_if_needed() {
+    if [ -x /usr/bin/postgresql-setup ] && [ ! -f /var/lib/pgsql/data/PG_VERSION ]; then
+        log "Инициализация кластера PostgreSQL"
+        as_root postgresql-setup --initdb || die "Не удалось инициализировать PostgreSQL."
+    fi
+    if have pacman && [ ! -f /var/lib/postgres/data/PG_VERSION ]; then
+        log "Инициализация кластера PostgreSQL (Arch)"
+        as_postgres initdb -D /var/lib/postgres/data \
+            || die "Не удалось инициализировать PostgreSQL."
+    fi
+    # На RHEL для 127.0.0.1 по умолчанию стоит ident - заменяем на парольную аутентификацию
+    HBA=/var/lib/pgsql/data/pg_hba.conf
+    if [ -f "$HBA" ] && as_root grep -Eq '^host.*[[:space:]]ident$' "$HBA"; then
+        log "Включение парольной аутентификации в pg_hba.conf"
+        as_root sed -i -E '/^host/ s/[[:space:]]ident$/ md5/' "$HBA"
+        PG_RESTART=1
+    fi
+}
+
+# Запустить службу PostgreSQL и дождаться готовности
+start_postgres() {
+    log "Запуск PostgreSQL"
+    PG_RESTART=0
+    init_postgres_cluster_if_needed
+
+    if have systemctl && [ -d /run/systemd/system ]; then
+        if [ "$PG_RESTART" -eq 1 ]; then
+            as_root systemctl restart postgresql || die "Не удалось перезапустить PostgreSQL."
+        else
+            as_root systemctl enable --now postgresql \
+                || die "Не удалось запустить PostgreSQL через systemctl."
+        fi
+    elif have service; then
+        as_root service postgresql start || die "Не удалось запустить PostgreSQL через service."
+    else
+        die "Не найден systemctl/service для запуска PostgreSQL."
+    fi
+
+    i=0
+    until psql_admin "SELECT 1" >/dev/null 2>&1; do
+        i=$((i + 1))
+        [ "$i" -le 30 ] || die "PostgreSQL не ответил за 30 секунд."
+        sleep 1
+    done
+    log "PostgreSQL запущен"
+}
+
+# Создать пользователя и базу данных (безопасно при повторном запуске)
+setup_database() {
+    log "Настройка базы данных '$DB_NAME' и пользователя '$DB_USER'"
+    esc_pass=$(sql_escape "$DB_PASSWORD")
+
+    # Пользователь: создаём или обновляем пароль
+    if [ "$(psql_admin "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'")" = "1" ]; then
+        log "Пользователь '$DB_USER' уже существует - обновляем пароль"
+        psql_admin "ALTER ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$esc_pass'" >/dev/null \
+            || die "Не удалось обновить пароль пользователя '$DB_USER'."
+    else
+        psql_admin "CREATE ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$esc_pass'" >/dev/null \
+            || die "Не удалось создать пользователя '$DB_USER'."
+    fi
+
+    # База данных: создаём, если её нет
+    if [ "$(psql_admin "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")" = "1" ]; then
+        log "База данных '$DB_NAME' уже существует"
+    else
+        psql_admin "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_USER\"" >/dev/null \
+            || die "Не удалось создать базу данных '$DB_NAME'."
+    fi
+    psql_admin "GRANT ALL PRIVILEGES ON DATABASE \"$DB_NAME\" TO \"$DB_USER\"" >/dev/null \
+        || die "Не удалось выдать права на базу '$DB_NAME'."
+
+    # Проверка подключения тем же способом, каким подключается приложение
+    PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+        -tA -c "SELECT 1" >/dev/null 2>&1 \
+        || die "Не удаётся подключиться к БД по паролю (проверьте pg_hba.conf)."
+    log "Подключение к базе данных работает"
+}
+
 # ---- MAIN ----
 main() {
     log "Развертывание $APP_NAME"
@@ -180,6 +278,8 @@ main() {
     install_packages
     fetch_source
     setup_venv
+    start_postgres
+    setup_database
 }
 
 main "$@"
