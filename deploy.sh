@@ -271,6 +271,79 @@ setup_database() {
     log "Подключение к базе данных работает"
 }
 
+# --------------------------- 6. Запуск приложения ----------------------------
+# Занят ли порт приложения другим процессом
+port_in_use() {
+    python3 - "$APP_PORT" <<'PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(0.5)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+# Остановить экземпляр, запущенный предыдущим запуском скрипта
+stop_previous_instance() {
+    if [ -f "$PID_FILE" ]; then
+        old_pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+            log "Остановка предыдущего экземпляра приложения (PID $old_pid)"
+            kill "$old_pid" 2>/dev/null || true
+            i=0
+            while kill -0 "$old_pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+                i=$((i + 1))
+                sleep 1
+            done
+            kill -9 "$old_pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+}
+
+# Запустить Uvicorn в фоновом режиме
+start_app() {
+    stop_previous_instance
+    if port_in_use; then
+        die "Порт $APP_PORT уже занят другим процессом. Освободите его или задайте APP_PORT."
+    fi
+
+    log "Запуск приложения (uvicorn $APP_MODULE, порт $APP_PORT)"
+    export DATABASE_URL="postgresql+psycopg://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
+    (
+        cd "$APP_DIR"
+        nohup "$VENV_DIR/bin/uvicorn" "$APP_MODULE" --host 0.0.0.0 --port "$APP_PORT" \
+            >"$LOG_FILE" 2>&1 &
+        echo $! >"$PID_FILE"
+    )
+    sleep 1
+    kill -0 "$(cat "$PID_FILE")" 2>/dev/null \
+        || die "Uvicorn завершился сразу после запуска. Лог: $LOG_FILE"
+}
+
+# --------------------------- 7. Проверка результата --------------------------
+# Дождаться ответа healthcheck (до 30 секунд)
+check_health() {
+    log "Проверка healthcheck: $APP_URL$HEALTH_PATH"
+    i=0
+    until curl -fsS "$APP_URL$HEALTH_PATH" >/dev/null 2>&1; do
+        i=$((i + 1))
+        if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            tail -n 20 "$LOG_FILE" >&2 || true
+            die "Приложение упало во время запуска. Лог: $LOG_FILE"
+        fi
+        if [ "$i" -gt 30 ]; then
+            tail -n 20 "$LOG_FILE" >&2 || true
+            die "Healthcheck не прошёл за 30 секунд. Лог: $LOG_FILE"
+        fi
+        sleep 1
+    done
+}
+
 # ---- MAIN ----
 main() {
     log "Развертывание $APP_NAME"
@@ -280,6 +353,14 @@ main() {
     setup_venv
     start_postgres
     setup_database
+    start_app
+    check_health
+
+    echo
+    echo "Application deployed successfully."
+    echo "Application is available at: $APP_URL"
+    echo "Swagger API: $APP_URL/docs"
+    echo "Log file: $LOG_FILE (PID file: $PID_FILE)"
 }
 
 main "$@"
