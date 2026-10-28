@@ -141,11 +141,45 @@ install_packages() {
     log "Установка пакетов завершена"
 }
 
+# --------------------------- 2. Исходный код ---------------------------------
+# Клонировать репозиторий, если исходников ещё нет
+fetch_source() {
+    if [ -f "$APP_DIR/app/main.py" ]; then
+        log "Исходный код уже существует: $APP_DIR (клонирование пропущено)"
+    elif [ -d "$APP_DIR/.git" ]; then
+        log "Репозиторий уже существует: $APP_DIR (клонирование пропущено)"
+    else
+        log "Клонирование $REPOSITORY_URL в $APP_DIR"
+        git clone "$REPOSITORY_URL" "$APP_DIR" \
+            || die "Не удалось клонировать репозиторий $REPOSITORY_URL."
+    fi
+    [ -f "$APP_DIR/requirements.txt" ] || die "В $APP_DIR нет файла requirements.txt."
+}
+
+# --------------------------- 3-4. Окружение и зависимости --------------------
+# Создать .venv (если нет) и установить зависимости внутри него
+setup_venv() {
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        log "Виртуальное окружение уже существует: $VENV_DIR"
+    else
+        log "Создание виртуального окружения $VENV_DIR"
+        python3 -m venv "$VENV_DIR" || die "Не удалось создать виртуальное окружение."
+    fi
+
+    log "Установка Python-зависимостей из requirements.txt"
+    "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip \
+        || warn "Не удалось обновить pip, продолжаем с текущей версией."
+    "$VENV_DIR/bin/python" -m pip install --quiet -r "$APP_DIR/requirements.txt" \
+        || die "Не удалось установить зависимости из requirements.txt."
+}
+
 # ---- MAIN ----
 main() {
     log "Развертывание $APP_NAME"
     log "Каталог приложения: $APP_DIR"
     install_packages
+    fetch_source
+    setup_venv
 }
 
 main "$@"
