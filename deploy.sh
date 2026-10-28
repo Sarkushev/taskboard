@@ -104,8 +104,7 @@ install_packages() {
     else
         MISSING="$MISSING pip venv"
     fi
-    have psql           || MISSING="$MISSING postgresql"
-    pg_server_installed || MISSING="$MISSING postgresql"
+    if ! have psql || ! pg_server_installed; then MISSING="$MISSING postgresql"; fi
 
     if [ -z "$MISSING" ]; then
         log "Все необходимые программы уже установлены"
