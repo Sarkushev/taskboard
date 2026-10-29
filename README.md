@@ -102,3 +102,31 @@ curl -X PATCH http://localhost:8000/api/tasks/1/status \
   -H "Content-Type: application/json" \
   -d "{\"status\":\"done\"}"
 ```
+
+## Automated deployment
+
+The whole deployment is automated with `deploy.sh` (POSIX sh). On a fresh Linux
+machine run:
+
+~~~
+git clone <this repository>
+cd taskboard
+chmod +x deploy.sh
+./deploy.sh
+~~~
+
+The script installs missing packages (git, python3, pip, venv, curl, PostgreSQL),
+creates `.venv`, installs `requirements.txt`, starts PostgreSQL, creates the
+`taskboard` database and user, starts the application with Uvicorn and checks
+`/api/health`. It is safe to run repeatedly.
+
+Main parameters can be overridden through environment variables, for example:
+`APP_PORT=9000 ./deploy.sh` (database settings must match `app/config.py`).
+
+After a successful run:
+
+- Web UI: http://localhost:8000/
+- Swagger: http://localhost:8000/docs
+- Healthcheck: http://localhost:8000/api/health
+
+Application log: `/tmp/taskboard.log`, PID file: `/tmp/taskboard.pid`.
